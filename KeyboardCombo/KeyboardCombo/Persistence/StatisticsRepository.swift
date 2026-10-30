@@ -13,64 +13,83 @@ final class StatisticsRepository: @unchecked Sendable {
     func snapshot(
         granularity: ReportGranularity,
         anchor: Date,
-        selectedStart: Date? = nil
+        selectedStart: Date? = nil,
+        excluding excludedKeyCodes: Set<UInt16> = []
     ) throws -> ReportSnapshot {
         let visibleInterval = visibleInterval(for: granularity, anchor: anchor)
         let rows = try database.fetch(from: visibleInterval.start, to: visibleInterval.end)
+            .filter { !excludedKeyCodes.contains($0.keyCode) }
         let bucketStarts = timelineBucketStarts(for: granularity, in: visibleInterval)
-        let countsByBucket = Dictionary(grouping: rows) {
+        let rowsByBucket = Dictionary(grouping: rows) {
             bucketStart(containing: $0.bucketStart, granularity: granularity)
-        }.mapValues { groupedRows in
-            groupedRows.reduce(Int64(0)) { $0 + $1.count }
         }
 
         let timeline = bucketStarts.map {
-            TimelinePoint(start: $0, count: countsByBucket[$0, default: 0])
+            TimelinePoint(
+                start: $0,
+                count: rowsByBucket[$0, default: []].reduce(Int64(0)) { $0 + $1.count }
+            )
         }
+
+        let allCodes = Set(KeyCatalog.allKeys.map(\.keyCode))
+            .subtracting(excludedKeyCodes)
+            .union(rows.map(\.keyCode))
+        let displayNames = Dictionary(
+            uniqueKeysWithValues: allCodes.map { ($0, KeyCatalog.displayName(for: $0)) }
+        )
+        let buckets = Dictionary(uniqueKeysWithValues: bucketStarts.map { start in
+            let groupedByKey = Dictionary(
+                grouping: rowsByBucket[start, default: []],
+                by: \.keyCode
+            )
+            .mapValues { $0.reduce(Int64(0)) { $0 + $1.count } }
+            let total = groupedByKey.values.reduce(Int64(0), +)
+            let keyStatistics = allCodes.map { keyCode in
+                let count = groupedByKey[keyCode, default: 0]
+                return KeyStatistic(
+                    keyCode: keyCode,
+                    count: count,
+                    percentage: total == 0 ? 0 : Double(count) / Double(total)
+                )
+            }
+            .sorted {
+                $0.count == $1.count
+                    ? displayNames[$0.keyCode, default: ""] < displayNames[$1.keyCode, default: ""]
+                    : $0.count > $1.count
+            }
+            let interval = DateInterval(
+                start: start,
+                end: calendar.date(
+                    byAdding: granularity.calendarComponent,
+                    value: 1,
+                    to: start
+                ) ?? visibleInterval.end
+            )
+            return (start, ReportBucket(interval: interval, keyStatistics: keyStatistics))
+        })
 
         let desiredStart = selectedStart
             .map { bucketStart(containing: $0, granularity: granularity) }
             ?? defaultSelectedStart(for: granularity, visibleInterval: visibleInterval)
-        let selectedInterval = DateInterval(
-            start: desiredStart,
-            end: calendar.date(
-                byAdding: granularity.calendarComponent,
-                value: 1,
-                to: desiredStart
-            ) ?? visibleInterval.end
-        )
-
-        let selectedRows = rows.filter {
-            $0.bucketStart >= selectedInterval.start && $0.bucketStart < selectedInterval.end
-        }
-        let groupedByKey = Dictionary(grouping: selectedRows, by: \.keyCode)
-            .mapValues { $0.reduce(Int64(0)) { $0 + $1.count } }
-        let total = groupedByKey.values.reduce(Int64(0), +)
-        let allCodes = Set(KeyCatalog.allKeys.map(\.keyCode)).union(groupedByKey.keys)
-        let keyStatistics = allCodes.map { keyCode in
-            let count = groupedByKey[keyCode, default: 0]
-            return KeyStatistic(
-                keyCode: keyCode,
-                count: count,
-                percentage: total == 0 ? 0 : Double(count) / Double(total)
-            )
-        }
-        .sorted {
-            $0.count == $1.count
-                ? KeyCatalog.displayName(for: $0.keyCode) < KeyCatalog.displayName(for: $1.keyCode)
-                : $0.count > $1.count
-        }
+        let resolvedSelectedStart = buckets[desiredStart] == nil
+            ? defaultSelectedStart(for: granularity, visibleInterval: visibleInterval)
+            : desiredStart
 
         return ReportSnapshot(
             visibleInterval: visibleInterval,
-            selectedInterval: selectedInterval,
             timeline: timeline,
-            keyStatistics: keyStatistics
+            buckets: buckets,
+            selectedBucketStart: resolvedSelectedStart
         )
     }
 
-    func totalAndTopKeys(in interval: DateInterval, limit: Int = 5) throws -> (Int64, [KeyStatistic]) {
+    func totalAndTopKeys(
+        in interval: DateInterval,
+        limit: Int = 5,
+        excluding excludedKeyCodes: Set<UInt16> = []
+    ) throws -> (Int64, [KeyStatistic]) {
         let rows = try database.fetch(from: interval.start, to: interval.end)
+            .filter { !excludedKeyCodes.contains($0.keyCode) }
         let counts = Dictionary(grouping: rows, by: \.keyCode)
             .mapValues { $0.reduce(Int64(0)) { $0 + $1.count } }
         let total = counts.values.reduce(Int64(0), +)

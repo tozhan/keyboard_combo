@@ -6,7 +6,7 @@ struct KeyboardComboApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("Keyboard Combo", id: "reports") {
+        Window("Keyboard Combo", id: "reports") {
             RootView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 660)

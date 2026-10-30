@@ -45,13 +45,36 @@ struct KeyStatistic: Identifiable, Sendable, Equatable {
     var id: UInt16 { keyCode }
 }
 
+struct ReportBucket: Sendable, Equatable {
+    let interval: DateInterval
+    let keyStatistics: [KeyStatistic]
+}
+
 struct ReportSnapshot: Sendable, Equatable {
     let visibleInterval: DateInterval
-    let selectedInterval: DateInterval
     let timeline: [TimelinePoint]
-    let keyStatistics: [KeyStatistic]
+    let buckets: [Date: ReportBucket]
+    let selectedBucketStart: Date
+
+    var selectedInterval: DateInterval {
+        buckets[selectedBucketStart]?.interval ?? visibleInterval
+    }
+
+    var keyStatistics: [KeyStatistic] {
+        buckets[selectedBucketStart]?.keyStatistics ?? []
+    }
 
     var selectedTotal: Int64 {
         keyStatistics.reduce(0) { $0 + $1.count }
+    }
+
+    func selectingBucket(start: Date) -> ReportSnapshot {
+        guard buckets[start] != nil else { return self }
+        return ReportSnapshot(
+            visibleInterval: visibleInterval,
+            timeline: timeline,
+            buckets: buckets,
+            selectedBucketStart: start
+        )
     }
 }

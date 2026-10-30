@@ -30,6 +30,55 @@ final class StatisticsRepositoryTests: XCTestCase {
             1,
             accuracy: 0.000_001
         )
+
+        let nextHourSnapshot = snapshot.selectingBucket(start: eleven)
+        XCTAssertEqual(nextHourSnapshot.selectedInterval.start, eleven)
+        XCTAssertEqual(nextHourSnapshot.selectedTotal, 10)
+        XCTAssertEqual(
+            nextHourSnapshot.keyStatistics.first(where: { $0.keyCode == 0 })?.percentage,
+            1
+        )
+    }
+
+    func testExcludedKeysAreRemovedFromReportsButRemainStored() throws {
+        let database = try makeDatabase()
+        let calendar = utcCalendar()
+        let repository = StatisticsRepository(database: database, calendar: calendar)
+        let ten = makeDate(year: 2026, month: 9, day: 1, hour: 10)
+        let eleven = makeDate(year: 2026, month: 9, day: 1, hour: 11)
+        try database.add([
+            HourlyKeyCount(bucketStart: ten, keyCode: 122, count: 80),
+            HourlyKeyCount(bucketStart: ten, keyCode: 0, count: 20)
+        ])
+
+        let filtered = try repository.snapshot(
+            granularity: .hour,
+            anchor: ten,
+            selectedStart: ten,
+            excluding: [122]
+        )
+
+        XCTAssertEqual(filtered.selectedTotal, 20)
+        XCTAssertEqual(filtered.timeline.first(where: { $0.start == ten })?.count, 20)
+        XCTAssertNil(filtered.keyStatistics.first(where: { $0.keyCode == 122 }))
+        XCTAssertEqual(
+            filtered.keyStatistics.first(where: { $0.keyCode == 0 })?.percentage,
+            1
+        )
+
+        let summary = try repository.totalAndTopKeys(
+            in: DateInterval(start: ten, end: eleven),
+            excluding: [122]
+        )
+        XCTAssertEqual(summary.0, 20)
+        XCTAssertEqual(summary.1.map(\.keyCode), [0])
+
+        let unfiltered = try repository.snapshot(
+            granularity: .hour,
+            anchor: ten,
+            selectedStart: ten
+        )
+        XCTAssertEqual(unfiltered.selectedTotal, 100)
     }
 
     func testWeekStartsOnMondayAndContainsTwelveBuckets() throws {

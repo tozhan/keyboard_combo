@@ -2,11 +2,12 @@ import Charts
 import SwiftUI
 
 struct ReportsView: View {
+    private static let automaticRefreshInterval = Duration.seconds(60)
+
     @Environment(AppModel.self) private var model
     @State private var granularity: ReportGranularity = .hour
     @State private var anchor = Date.now
     @State private var selectedStart: Date?
-    @State private var chartSelection: Date?
     @State private var snapshot: ReportSnapshot?
     @State private var isLoading = false
     @State private var errorMessage: String?
@@ -21,12 +22,18 @@ struct ReportsView: View {
             }
 
             if let snapshot {
+                let displayedSnapshot = snapshot.selectingBucket(
+                    start: selectedStart ?? snapshot.selectedBucketStart
+                )
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        summary(snapshot)
-                        timelineChart(snapshot)
-                        KeyboardHeatmapView(statistics: snapshot.keyStatistics)
-                        KeyStatisticsTable(statistics: snapshot.keyStatistics)
+                        summary(displayedSnapshot)
+                        timelineChart(displayedSnapshot)
+                        KeyboardHeatmapView(
+                            statistics: displayedSnapshot.keyStatistics,
+                            excludedKeyCodes: model.excludedKeyCodes
+                        )
+                        KeyStatisticsTable(statistics: displayedSnapshot.keyStatistics)
                     }
                     .padding(24)
                 }
@@ -46,25 +53,26 @@ struct ReportsView: View {
         }
         .task {
             await load()
+            do {
+                while !Task.isCancelled {
+                    try await Task.sleep(for: Self.automaticRefreshInterval)
+                    await load()
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
         }
         .onChange(of: granularity) {
             selectedStart = nil
-            chartSelection = nil
             Task { await load() }
         }
         .onChange(of: anchor) {
             selectedStart = nil
-            chartSelection = nil
             Task { await load() }
         }
-        .onChange(of: chartSelection) {
-            guard let chartSelection, let snapshot else { return }
-            let closest = snapshot.timeline.min {
-                abs($0.start.timeIntervalSince(chartSelection))
-                    < abs($1.start.timeIntervalSince(chartSelection))
-            }
-            guard closest?.start != selectedStart else { return }
-            selectedStart = closest?.start
+        .onChange(of: model.excludedKeyCodes) {
             Task { await load() }
         }
     }
@@ -104,6 +112,14 @@ struct ReportsView: View {
                 Image(systemName: "chevron.right")
             }
             .accessibilityLabel("下一个时间范围")
+
+            Button {
+                Task { await load() }
+            } label: {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            .disabled(isLoading)
+            .help("立即刷新统计数据")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -194,9 +210,34 @@ struct ReportsView: View {
                 .accessibilityLabel(axisLabel(for: point.start))
                 .accessibilityValue(point.count.formatted())
             }
-            .chartXSelection(value: $chartSelection)
             .chartYAxis {
                 AxisMarks(position: .leading)
+            }
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            guard case let .active(location) = phase,
+                                  let plotFrame = proxy.plotFrame
+                            else {
+                                return
+                            }
+
+                            let frame = geometry[plotFrame]
+                            guard frame.contains(location) else { return }
+                            updateChartSelection(
+                                at: CGPoint(
+                                    x: location.x - frame.minX,
+                                    y: location.y - frame.minY
+                                ),
+                                proxy: proxy,
+                                plotSize: frame.size,
+                                snapshot: snapshot
+                            )
+                        }
+                }
             }
             .frame(height: 230)
             .padding(14)
@@ -206,6 +247,59 @@ struct ReportsView: View {
                     .stroke(.quaternary)
             }
         }
+    }
+
+    private func updateChartSelection(
+        at location: CGPoint,
+        proxy: ChartProxy,
+        plotSize: CGSize,
+        snapshot: ReportSnapshot
+    ) {
+        let positionedPoints = snapshot.timeline.compactMap { point -> (TimelinePoint, CGFloat)? in
+            guard let x = proxy.position(forX: point.start) else { return nil }
+            return (point, x)
+        }
+        guard let nearestIndex = positionedPoints.indices.min(by: {
+            abs(positionedPoints[$0].1 - location.x)
+                < abs(positionedPoints[$1].1 - location.x)
+        }) else {
+            return
+        }
+
+        let (point, centerX) = positionedPoints[nearestIndex]
+        guard point.count > 0,
+              let topY = proxy.position(forY: point.count),
+              let bottomY = proxy.position(forY: 0)
+        else {
+            return
+        }
+
+        var neighboringDistances: [CGFloat] = []
+        if nearestIndex > positionedPoints.startIndex {
+            neighboringDistances.append(
+                centerX - positionedPoints[positionedPoints.index(before: nearestIndex)].1
+            )
+        }
+        if nearestIndex < positionedPoints.index(before: positionedPoints.endIndex) {
+            neighboringDistances.append(
+                positionedPoints[positionedPoints.index(after: nearestIndex)].1 - centerX
+            )
+        }
+        let bucketWidth = neighboringDistances.min()
+            ?? plotSize.width / CGFloat(max(positionedPoints.count, 1))
+        let halfBarWidth = bucketWidth * 0.4
+        let barTop = min(topY, bottomY)
+        let barBottom = max(topY, bottomY)
+
+        guard abs(location.x - centerX) <= halfBarWidth,
+              location.y >= barTop,
+              location.y <= barBottom
+        else {
+            return
+        }
+
+        guard selectedStart != point.start else { return }
+        selectedStart = point.start
     }
 
     private func moveAnchor(by direction: Int) {

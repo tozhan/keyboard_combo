@@ -43,7 +43,24 @@ struct KeyStatisticsTable: View {
             }
     }
 
+    private var usageRankByKeyCode: [UInt16: Int] {
+        let rankedStatistics = statistics
+            .filter { $0.count > 0 }
+            .sorted {
+                $0.count == $1.count
+                    ? $0.keyCode < $1.keyCode
+                    : $0.count > $1.count
+            }
+        return Dictionary(
+            uniqueKeysWithValues: rankedStatistics.enumerated().map {
+                ($0.element.keyCode, $0.offset + 1)
+            }
+        )
+    }
+
     var body: some View {
+        let usageRanks = usageRankByKeyCode
+
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("按键明细")
@@ -58,6 +75,9 @@ struct KeyStatisticsTable: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
+                    Text("排名")
+                        .frame(width: 56, alignment: .trailing)
+                        .help("按使用次数从高到低的整体排名")
                     headerButton("按键", field: .key)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     headerButton("次数", field: .count)
@@ -75,6 +95,14 @@ struct KeyStatisticsTable: View {
                 LazyVStack(spacing: 0) {
                     ForEach(displayedStatistics) { statistic in
                         HStack(spacing: 12) {
+                            Text(
+                                usageRanks[statistic.keyCode]
+                                    .map(String.init) ?? "—"
+                            )
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
+
                             HStack {
                                 Text(KeyCatalog.displayName(for: statistic.keyCode))
                                 Text("#\(statistic.keyCode)")

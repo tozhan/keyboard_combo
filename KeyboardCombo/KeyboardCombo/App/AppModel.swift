@@ -5,6 +5,8 @@ import Observation
 @MainActor
 @Observable
 final class AppModel {
+    private static let excludedKeyCodesDefaultsKey = "excludedKeyCodes"
+
     enum CaptureStatus {
         case active
         case paused
@@ -34,6 +36,7 @@ final class AppModel {
     private(set) var isStarted = false
     var captureEnabled: Bool
     var includeAutoRepeat: Bool
+    private(set) var excludedKeyCodes: Set<UInt16>
 
     @ObservationIgnored private let repository: StatisticsRepository
     @ObservationIgnored private let aggregator: KeyAggregationActor
@@ -63,6 +66,14 @@ final class AppModel {
         permissionManager = InputPermissionManager()
         captureEnabled = UserDefaults.standard.object(forKey: "captureEnabled") as? Bool ?? true
         includeAutoRepeat = UserDefaults.standard.bool(forKey: "includeAutoRepeat")
+        excludedKeyCodes = Set(
+            UserDefaults.standard
+                .array(forKey: Self.excludedKeyCodesDefaultsKey)?
+                .compactMap { value in
+                    guard let number = value as? NSNumber else { return nil }
+                    return UInt16(exactly: number.intValue)
+                } ?? []
+        )
 
         let (stream, continuation) = AsyncStream<KeyPress>.makeStream(
             bufferingPolicy: .bufferingNewest(4_096)
@@ -144,13 +155,28 @@ final class AppModel {
         UserDefaults.standard.set(enabled, forKey: "includeAutoRepeat")
     }
 
+    func setExcludedKeyCodes(_ keyCodes: Set<UInt16>) {
+        excludedKeyCodes = keyCodes
+        UserDefaults.standard.set(
+            keyCodes.sorted().map(Int.init),
+            forKey: Self.excludedKeyCodesDefaultsKey
+        )
+        Task {
+            await refreshSummary()
+        }
+    }
+
     func refreshSummary() async {
         await aggregator.flush()
         let interval = repository.todayInterval()
+        let excludedKeyCodes = excludedKeyCodes
 
         do {
             let result = try await Task.detached { [repository] in
-                try repository.totalAndTopKeys(in: interval)
+                try repository.totalAndTopKeys(
+                    in: interval,
+                    excluding: excludedKeyCodes
+                )
             }.value
             todayTotal = result.0
             topKeys = result.1
@@ -166,11 +192,13 @@ final class AppModel {
         selectedStart: Date?
     ) async throws -> ReportSnapshot {
         await aggregator.flush()
+        let excludedKeyCodes = excludedKeyCodes
         return try await Task.detached { [repository] in
             try repository.snapshot(
                 granularity: granularity,
                 anchor: anchor,
-                selectedStart: selectedStart
+                selectedStart: selectedStart,
+                excluding: excludedKeyCodes
             )
         }.value
     }
